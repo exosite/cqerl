@@ -11,7 +11,7 @@
 -export([start_link/2, new_user/2, remove_user/1,
          run_query/2, query_async/2, fetch_more/1, fetch_more_async/1,
          prepare_query/2,
-         batch_ready/2]). 
+         batch_ready/2]).
 
 %% ------------------------------------------------------------------
 %% gen_fsm Function Exports
@@ -26,25 +26,25 @@
 end).
 
 -export([init/1, terminate/3,
-         starting/2,    starting/3, 
+         starting/2,    starting/3,
          live/2,        live/3,
          sleep/2,       sleep/3,
-         handle_event/3, handle_sync_event/4, handle_info/3, 
+         handle_event/3, handle_sync_event/4, handle_info/3,
          code_change/4]).
-                 
+
 -record(client_state, {
     %% Authentication state (only kept during initialization)
     authmod :: atom(),
     authstate :: any(),
     authargs :: list(any()),
-    
+
     %% Information about the connection
     inet :: any(),
     trans :: atom(),
     socket :: gen_tcp:socket() | ssl:sslsocket(),
     compression_type :: undefined | snappy | lz4,
     keyspace :: atom(),
-    
+
     %% Operating state
     sleep :: integer(),
     delayed = <<>> :: binary(),     % Fragmented message continuation
@@ -63,12 +63,12 @@ end).
 
 %% ------------------------------------------------------------------
 %% API Function Definitions
-%% ------------------------------------------------------------------    
+%% ------------------------------------------------------------------
 
 start_link(Inet, Opts) ->
     gen_fsm:start_link(?MODULE, [Inet, Opts], []).
 
-new_user(Pid, From) -> 
+new_user(Pid, From) ->
     gen_fsm:send_event(Pid, {new_user, From}).
 
 remove_user({ClientPid, ClientRef}) ->
@@ -118,17 +118,17 @@ init([Inet, Opts]) ->
             {auth, {AuthHandler, AuthArgs}} = proplists:lookup(auth, Opts),
             {ok, OptionsFrame} = cqerl_protocol:options_frame(#cqerl_frame{}),
             put(uuidstate, uuid:new(self())),
-            State = #client_state{ 
+            State = #client_state{
                 socket=Socket, trans=Transport, inet=Inet,
                 authmod=AuthHandler, authargs=AuthArgs,
-                users=[], 
+                users=[],
                 sleep=get_sleep_duration(Opts),
                 keyspace=proplists:get_value(keyspace, Opts)
             },
             send_to_db(State, OptionsFrame),
             activate_socket(State),
             {ok, starting, State};
-        
+
         {error, Reason} ->
             {stop, {connection_error, Reason}}
     end.
@@ -138,7 +138,7 @@ init([Inet, Opts]) ->
 
 starting({new_user, From}, State=#client_state{users=Users}) ->
     {next_state, starting, State#client_state{users=[From | Users]}};
-    
+
 starting(_Event, State) ->
     {next_state, starting, State}.
 
@@ -169,13 +169,13 @@ live({send_query, Tag, Ref, Batch=#cql_query_batch{}}, State=#client_state{inet=
     cqerl_batch_sup:new_batch_coordinator(#cql_call{type=async, caller=Tag, client=Ref}, Inet, Batch),
     {next_state, live, State};
 
-live({Msg, Tag, Ref, Query}, State=#client_state{available_slots=[], queued=Queue0}) when Msg == send_query orelse 
+live({Msg, Tag, Ref, Query}, State=#client_state{available_slots=[], queued=Queue0}) when Msg == send_query orelse
                                                                                           Msg == fetch_more ->
     {next_state, live, State#client_state{
         queued=queue:in({#cql_call{type=async, caller=Tag, client=Ref}, Query}, Queue0)
     }};
 
-live({Msg, Tag, Ref, Item}, State) when Msg == send_query orelse 
+live({Msg, Tag, Ref, Item}, State) when Msg == send_query orelse
                                         Msg == fetch_more ->
     case Item of
         Query=#cql_query{} -> ok;
@@ -194,11 +194,11 @@ live({send_query, Ref, Batch=#cql_query_batch{}}, From, State=#client_state{inet
     {next_state, live, State};
 
 
-live({Msg, Ref, Query}, From, State=#client_state{available_slots=[], queued=Queue0}) when Msg == send_query orelse 
+live({Msg, Ref, Query}, From, State=#client_state{available_slots=[], queued=Queue0}) when Msg == send_query orelse
                                                                                           Msg == fetch_more ->
     {next_state, live, State#client_state{queued=queue:in({#cql_call{type=sync, caller=From, client=Ref}, Query}, Queue0)}};
 
-live({Msg, Ref, Item}, From, State) when Msg == send_query orelse 
+live({Msg, Ref, Item}, From, State) when Msg == send_query orelse
                                          Msg == fetch_more ->
     case Item of
         Query=#cql_query{} -> ok;
@@ -237,13 +237,13 @@ handle_event(_Event, StateName, State) ->
 handle_sync_event(_Event, _From, StateName, State) ->
     {reply, ok, StateName, State}.
 
-handle_info({prepared, CachedQuery=#cqerl_cached_query{key={_Inet, Statement}}}, live, 
+handle_info({prepared, CachedQuery=#cqerl_cached_query{key={_Inet, Statement}}}, live,
             State=#client_state{waiting_preparation=Waiting}) ->
     case dict:find(Statement, Waiting) of
         {ok, Waiters} ->
             Waiting2 = dict:erase(Statement, Waiting),
             NewState = lists:foldl(fun
-                (Item, StateAcc=#client_state{available_slots=[], queued=Queue0}) -> 
+                (Item, StateAcc=#client_state{available_slots=[], queued=Queue0}) ->
                     StateAcc#client_state{queued=queue:in(Item, Queue0)};
                 ({Call, Item}, StateAcc) ->
                     process_outgoing_query(Call, {CachedQuery, Item}, StateAcc)
@@ -273,21 +273,21 @@ handle_info({ Transport, Socket, BinaryMsg }, starting, State = #client_state{ s
         %% fragment
         {delay, Delayed} ->
             {next_state, starting, State};
-        
+
         %% Server tells us what version and compression algorithm it supports
         {ok, #cqerl_frame{opcode=?CQERL_OP_SUPPORTED}, Payload, Delayed} ->
             Compression = choose_compression_type(proplists:lookup('COMPRESSION', Payload)),
             SelectedVersion = choose_cql_version(proplists:lookup('CQL_VERSION', Payload)),
-            {ok, StartupFrame} = cqerl_protocol:startup_frame(#cqerl_frame{}, #cqerl_startup_options{compression=Compression, 
+            {ok, StartupFrame} = cqerl_protocol:startup_frame(#cqerl_frame{}, #cqerl_startup_options{compression=Compression,
                                                                                                      cql_version=SelectedVersion}),
             send_to_db(State, StartupFrame),
             {next_state, starting, State#client_state{compression_type=Compression}};
-        
+
         %% Server tells us all is clear, we can start to throw queries at it
         {ok, #cqerl_frame{opcode=?CQERL_OP_READY}, _, Delayed} ->
             {StateName, FinalState} = maybe_set_keyspace(State),
             {next_state, StateName, FinalState};
-        
+
         %% Server tells us we need to authenticate
         {ok, #cqerl_frame{opcode=?CQERL_OP_AUTHENTICATE}, Body, Delayed} ->
             #client_state{ authmod=AuthMod, authargs=AuthArgs, inet=Inet } = State,
@@ -295,13 +295,13 @@ handle_info({ Transport, Socket, BinaryMsg }, starting, State = #client_state{ s
                 {close, Reason} ->
                     close_socket(State),
                     {stop, {auth_client_closed, Reason}, State#client_state{socket=undefined}};
-                
+
                 {reply, Reply, AuthState} ->
                     {ok, AuthFrame} = cqerl_protocol:auth_frame(base_frame(State), Reply),
                     send_to_db(State, AuthFrame),
                     {next_state, starting, State#client_state{ authstate=AuthState }}
             end;
-        
+
         %% Server tells us we need to give another piece of data
         {ok, #cqerl_frame{opcode=?CQERL_OP_AUTH_CHALLENGE}, Body, Delayed} ->
             #client_state{ authmod=AuthMod, authstate=AuthState } = State,
@@ -309,25 +309,25 @@ handle_info({ Transport, Socket, BinaryMsg }, starting, State = #client_state{ s
                 {close, Reason} ->
                     close_socket(State),
                     {stop, {auth_client_closed, Reason}, State#client_state{socket=undefined}};
-                
+
                 {reply, Reply, AuthState} ->
                     {ok, AuthFrame} = cqerl_protocol:auth_frame(base_frame(State), Reply),
                     send_to_db(State, AuthFrame),
                     {next_state, starting, State#client_state{ authstate=AuthState }}
             end;
-        
+
         %% Server tells us something screwed up while authenticating
         {ok, #cqerl_frame{opcode=?CQERL_OP_ERROR}, {16#0100, AuthErrorDescription, _}, Delayed} ->
             #client_state{ authmod=AuthMod, authstate=AuthState } = State,
             AuthMod:auth_handle_error(AuthErrorDescription, AuthState),
             close_socket(State),
             {stop, {auth_server_refused, AuthErrorDescription}, State#client_state{socket=undefined}};
-            
+
         %% Server tells us something an error occured
         {ok, #cqerl_frame{opcode=?CQERL_OP_ERROR}, {ErrorCode, ErrorMessage, _}, Delayed} ->
             close_socket(State),
             {stop, {server_error, ErrorCode, ErrorMessage}, State#client_state{socket=undefined}};
-        
+
         %% Server tells us the authentication went well, we can start shooting queries
         {ok, #cqerl_frame{opcode=?CQERL_OP_AUTH_SUCCESS}, Body, Delayed} ->
             #client_state{ authmod=AuthMod, authstate=AuthState} = State,
@@ -335,12 +335,12 @@ handle_info({ Transport, Socket, BinaryMsg }, starting, State = #client_state{ s
                 {close, Reason} ->
                     close_socket(State),
                     {stop, {auth_client_closed, Reason}, State#client_state{socket=undefined}};
-                
+
                 ok ->
                     {StateName, FinalState} = maybe_set_keyspace(State),
                     {next_state, StateName, FinalState }
             end;
-            
+
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT}, {set_keyspace, _KeySpaceName}, Delayed} ->
             {next_state, live, switch_to_live_state(State) }
     end,
@@ -351,14 +351,14 @@ handle_info({ Transport, Socket, BinaryMsg }, live, State = #client_state{ socke
     Resp = case cqerl_protocol:response_frame(base_frame(State), << Delayed0/binary, BinaryMsg/binary >>) of
         {delay, Delayed} ->
             {stop, {next_state, live, State}};
-        
+
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, {void, _}, Delayed} ->
             case dict:find(StreamID, State#client_state.queries) of
                 {ok, {Call, _}} -> respond_to_user(Call, void);
                 {ok, undefined} -> ok
             end,
             {next_state, live, release_stream_id(StreamID, State)};
-        
+
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, {rows, {ResultMetadata, ResultSet}}, Delayed} ->
             case dict:find(StreamID, State#client_state.queries) of
                 {ok, {Call=#cql_call{client=ClientRef}, {Query, ColumnSpecs}}} ->
@@ -375,14 +375,14 @@ handle_info({ Transport, Socket, BinaryMsg }, live, State = #client_state{ socke
                 {ok, undefined} -> ok
             end,
             {next_state, live, release_stream_id(StreamID, State)};
-        
+
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, ResponseTerm={set_keyspace, _KeySpaceName}, Delayed} ->
             case dict:find(StreamID, State#client_state.queries) of
                 {ok, {Call, _}} -> respond_to_user(Call, ResponseTerm);
                 {ok, undefined} -> ok
             end,
             {next_state, live, release_stream_id(StreamID, State)};
-        
+
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, {prepared, ResponseTerm}, Delayed} ->
             case dict:find(StreamID, State#client_state.queries) of
                 {ok, {preparing, Query}} ->
@@ -390,14 +390,14 @@ handle_info({ Transport, Socket, BinaryMsg }, live, State = #client_state{ socke
                 {ok, undefined} -> ok
             end,
             {next_state, live, release_stream_id(StreamID, State)};
-        
+
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, {schema_change, ResponseTerm}, Delayed} ->
             case dict:find(StreamID, State#client_state.queries) of
                 {ok, {Call, _}} -> respond_to_user(Call, ResponseTerm);
                 {ok, undefined} -> ok
             end,
             {next_state, live, release_stream_id(StreamID, State)};
-        
+
         {ok, #cqerl_frame{opcode=?CQERL_OP_ERROR, stream_id=StreamID}, ErrorTerm, Delayed} when StreamID >= 0 ->
             case dict:find(StreamID, State#client_state.queries) of
                 {ok, {preparing, Query}} ->
@@ -406,11 +406,11 @@ handle_info({ Transport, Socket, BinaryMsg }, live, State = #client_state{ socke
                 {ok, undefined} -> ok
             end,
             {next_state, live, release_stream_id(StreamID, State)};
-        
+
         {ok, #cqerl_frame{opcode=?CQERL_OP_EVENT}, _EventTerm, Delayed} ->
             ok%% TODO Manage incoming server-driven events
     end,
-    
+
     case Resp of
       {stop, Resp1} ->
         activate_socket(?STATE_FROM_RETURN(Resp1)),
@@ -420,15 +420,15 @@ handle_info({ Transport, Socket, BinaryMsg }, live, State = #client_state{ socke
       {_, _, _, State1} ->
         handle_info({Transport, Socket, Delayed}, live, State1#client_state{delayed = <<>>})
     end;
-    
+
 
 handle_info({ Transport, Socket, BinaryMsg }, sleep, State = #client_state{ socket=Socket, trans=Transport, sleep=Duration, delayed=Delayed0 }) ->
     Resp = case cqerl_protocol:response_frame(base_frame(State), << Delayed0/binary, BinaryMsg/binary >>) of
         %% To keep packets coherent, we still need to handle fragmented messages
         {delay, Delayed} ->
             {next_state, sleep, State#client_state{delayed=Delayed}};
-        
-        %% While sleeping, any response to previously sent queries are ignored, 
+
+        %% While sleeping, any response to previously sent queries are ignored,
         %% but we still need to manage internal state accordingly
         {ok, #cqerl_frame{stream_id=StreamID}} when StreamID < ?QUERIES_MAX, StreamID >= 0 ->
             Queries0 = State#client_state.queries,
@@ -436,7 +436,7 @@ handle_info({ Transport, Socket, BinaryMsg }, sleep, State = #client_state{ sock
             Queries1 = dict:store(StreamID, undefined, Queries0),
             Slots1 = ordsets:add_element(StreamID, Slots0),
             {next_state, sleep, State#client_state{available_slots=Slots1, queries=Queries1, delayed = <<>>}, Duration};
-        
+
         _ ->
             {next_state, sleep, State#client_state{delayed = <<>>}, Duration}
     end,
@@ -447,7 +447,7 @@ handle_info({'DOWN', _MonitorRef, process, Pid, _Info}, live, State=#client_stat
     case ets:match_object(Users, #client_user{pid=Pid, _='_'}) of
         [] -> {next_state, live, State};
         UserList ->
-            State1 = lists:foldl(fun(#client_user{ref=Ref}, StateAcc) -> 
+            State1 = lists:foldl(fun(#client_user{ref=Ref}, StateAcc) ->
                 remove_user(Ref, StateAcc)
             end, State, UserList),
             case ets:info(Users, size) of
@@ -467,10 +467,10 @@ terminate(_Reason, sleep, _State) ->
     ok;
 
 terminate(Reason, live, #client_state{queries=Queries}) ->
-    lists:foreach(fun 
-        ({_I, {#cql_call{type=sync, caller=From}, _}}) -> 
+    lists:foreach(fun
+        ({_I, {#cql_call{type=sync, caller=From}, _}}) ->
             gen_fsm:reply(From, {error, Reason});
-        ({_I, {#cql_call{type=async, caller={Pid, Tag}}, _}}) -> 
+        ({_I, {#cql_call{type=async, caller={Pid, Tag}}, _}}) ->
             Pid ! {cql_error, Tag, Reason};
         ({_I, _}) -> ok
     end, dict:to_list(Queries));
@@ -515,14 +515,14 @@ dequeue_query(State0=#client_state{queued=Queue0}) ->
 
 
 maybe_signal_busy(State) ->
-    if  
-        length(State#client_state.available_slots) == ?QUERIES_MAX - ?QUERIES_HW -> 
+    if
+        length(State#client_state.available_slots) == ?QUERIES_MAX - ?QUERIES_HW ->
             signal_busy();
         true -> ok
     end.
-    
-    
-    
+
+
+
 
 append_delayed_segment({X, Y, State}, Delayed) ->
     {X, Y, State#client_state{delayed=Delayed}};
@@ -530,11 +530,11 @@ append_delayed_segment({X, Y, Z, State}, Delayed) ->
     {X, Y, Z, State#client_state{delayed=Delayed}}.
 
 
-    
-    
+
+
 release_stream_id(StreamID, State=#client_state{available_slots=Slots, queries=Queries}) ->
     State2 = State#client_state{
-        available_slots=[StreamID | Slots], 
+        available_slots=[StreamID | Slots],
         queries=dict:store(StreamID, undefined, Queries)
     },
     if  length(Slots) - 5 == ?QUERIES_MAX - ?QUERIES_HW -> signal_avail();
@@ -584,14 +584,14 @@ process_outgoing_query(Call,
 process_outgoing_query(Call,
                        {CachedResult, Item},
                        State=#client_state{queries=Queries0}) ->
-                           
+
     {BaseFrame, State1} = seq_frame(State),
     I = BaseFrame#cqerl_frame.stream_id,
     case Item of
         Query = #cql_query{values=Values} ->
             ColumnSpecs = undefined,
             SkipMetadata = false;
-        #cql_result{cql_query = Query=#cql_query{values=Values}, 
+        #cql_result{cql_query = Query=#cql_query{values=Values},
                     columns=ColumnSpecs} ->
             SkipMetadata = true
     end,
@@ -612,7 +612,7 @@ process_outgoing_query(Call,
                     values  = cqerl_protocol:encode_query_values(Values)
                 }
             );
-        
+
         #cqerl_cached_query{query_ref=Ref, result_metadata=#cqerl_result_metadata{columns=CachedColumnSpecs}, params_metadata=PMetadata} ->
             Queries1 = dict:store(I, {Call, {Query, CachedColumnSpecs}}, Queries0),
             cqerl_protocol:execute_frame(BaseFrame,
@@ -656,10 +656,10 @@ add_user(From={Pid, _Tag}, Users) ->
     Monitor = monitor(process, Pid),
     ets:insert(Users, #client_user{ref=Ref, pid=Pid, monitor=Monitor}),
     gen_server:reply(From, {ok, {self(), Ref}}).
-    
-    
-    
-    
+
+
+
+
 
 remove_user(Ref, State=#client_state{users=Users, queued=Queue0, queries=Queries0}) ->
     case ets:lookup(Users, Ref) of
@@ -667,7 +667,7 @@ remove_user(Ref, State=#client_state{users=Users, queued=Queue0, queries=Queries
         [#client_user{monitor=Monitor}] ->
             demonitor(Monitor, [flush]),
             ets:delete(Users, Ref),
-            
+
             %% Remove in-flight queries from this user
             %% we leave slots as though they're being used, since they can't yet be reused
             Queries1 = lists:map(fun
@@ -697,12 +697,12 @@ switch_to_live_state(State=#client_state{users=Users, keyspace=Keyspace, inet=In
     UsersTab = ets:new(users, [set, private, {keypos, #client_user.ref}]),
     lists:foreach(fun(From) -> add_user(From, UsersTab) end, Users),
     Queries = create_queries_dict(),
-    State1 = State#client_state{ 
+    State1 = State#client_state{
         authstate=undefined, authargs=undefined, delayed = <<>>,
-        queued=queue:new(), 
+        queued=queue:new(),
         queries=Queries,
         available_slots = dict:fetch_keys(Queries),
-        users=UsersTab 
+        users=UsersTab
     },
     State1.
 
@@ -723,7 +723,7 @@ create_socket({Addr, Port}, Opts) ->
         {ssl, false} ->
             Transport = tcp,
             gen_tcp:connect(Addr, Port, BaseOpts, 2000);
-        {ssl = Transport, true} -> 
+        {ssl = Transport, true} ->
             ssl:connect(Addr, Port, BaseOpts, 2000);
         {ssl = Transport, SSLOpts} when is_list(SSLOpts) ->
             ssl:connect(Addr, Port, SSLOpts ++ BaseOpts, 2000)
@@ -794,9 +794,9 @@ choose_cql_version({'CQL_VERSION', Versions}) ->
         lists:map(fun (Version) -> semver:parse(Version) end, Versions)
     ),
     case application:get_env(cqerl, preferred_cql_version) of
-        undefined -> 
+        undefined ->
             [GreaterVersion|_] = SemVersions;
-        
+
         Version1 ->
             [GreaterVersion|_] = lists:dropwhile(fun (SemVersion) ->
                 case semver:compare(SemVersion, Version1) of
@@ -804,7 +804,7 @@ choose_cql_version({'CQL_VERSION', Versions}) ->
                     _ -> false
                 end
             end, SemVersions)
-            
+
     end,
     [_v | Version] = semver:vsn_string(GreaterVersion),
     list_to_binary(Version).
