@@ -570,6 +570,11 @@ encode_query_values(Values) ->
 
 encode_query_values(Values, []) ->
     encode_query_values(Values);
+encode_query_values(Values = [Head | _], ColumnSpecs) when not is_tuple(Head) ->
+    lists:zipwith(fun
+        (Value, #cqerl_result_column_spec{type=Type}) ->
+            cqerl_datatypes:encode_data({Type, Value})
+    end, Values, ColumnSpecs);
 encode_query_values(Values, ColumnSpecs) ->
     lists:map(fun
         (#cqerl_result_column_spec{name=ColumnName, type=Type}) ->
