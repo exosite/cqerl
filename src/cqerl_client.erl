@@ -52,7 +52,7 @@ end).
     queries = [] :: list({integer(), term()}),
     queued,
     available_slots = [] :: list(integer()),
-    waiting_preparation = []
+    waiting_preparation = dict:new()
 }).
 
 -record(client_user, {
@@ -239,9 +239,9 @@ handle_sync_event(_Event, _From, StateName, State) ->
 
 handle_info({prepared, CachedQuery=#cqerl_cached_query{key={_Inet, Statement}}}, live, 
             State=#client_state{waiting_preparation=Waiting}) ->
-    case orddict:find(Statement, Waiting) of
+    case dict:find(Statement, Waiting) of
         {ok, Waiters} ->
-            Waiting2 = orddict:erase(Statement, Waiting),
+            Waiting2 = dict:erase(Statement, Waiting),
             NewState = lists:foldl(fun
                 (Item, StateAcc=#client_state{available_slots=[], queued=Queue0}) -> 
                     StateAcc#client_state{queued=queue:in(Item, Queue0)};
@@ -255,9 +255,9 @@ handle_info({prepared, CachedQuery=#cqerl_cached_query{key={_Inet, Statement}}},
 
 handle_info({preparation_failed, {_Inet, Statement}, Reason}, live,
             State=#client_state{waiting_preparation=Waiting}) ->
-    case orddict:find(Statement, Waiting) of
+    case dict:find(Statement, Waiting) of
         {ok, Waiters} ->
-            Waiting2 = orddict:erase(Statement, Waiting),
+            Waiting2 = dict:erase(Statement, Waiting),
             lists:foreach(fun
                 ({Call, _Item}) ->
                     respond_to_user(Call, {error, Reason})
@@ -353,14 +353,14 @@ handle_info({ Transport, Socket, BinaryMsg }, live, State = #client_state{ socke
             {stop, {next_state, live, State}};
         
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, {void, _}, Delayed} ->
-            case orddict:find(StreamID, State#client_state.queries) of
+            case dict:find(StreamID, State#client_state.queries) of
                 {ok, {Call, _}} -> respond_to_user(Call, void);
                 {ok, undefined} -> ok
             end,
             {next_state, live, release_stream_id(StreamID, State)};
         
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, {rows, {ResultMetadata, ResultSet}}, Delayed} ->
-            case orddict:find(StreamID, State#client_state.queries) of
+            case dict:find(StreamID, State#client_state.queries) of
                 {ok, {Call=#cql_call{client=ClientRef}, {Query, ColumnSpecs}}} ->
                     respond_to_user(Call, #cql_result{
                         client = {self(), ClientRef},
@@ -377,14 +377,14 @@ handle_info({ Transport, Socket, BinaryMsg }, live, State = #client_state{ socke
             {next_state, live, release_stream_id(StreamID, State)};
         
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, ResponseTerm={set_keyspace, _KeySpaceName}, Delayed} ->
-            case orddict:find(StreamID, State#client_state.queries) of
+            case dict:find(StreamID, State#client_state.queries) of
                 {ok, {Call, _}} -> respond_to_user(Call, ResponseTerm);
                 {ok, undefined} -> ok
             end,
             {next_state, live, release_stream_id(StreamID, State)};
         
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, {prepared, ResponseTerm}, Delayed} ->
-            case orddict:find(StreamID, State#client_state.queries) of
+            case dict:find(StreamID, State#client_state.queries) of
                 {ok, {preparing, Query}} ->
                     cqerl_cache:query_was_prepared({State#client_state.inet, Query}, ResponseTerm);
                 {ok, undefined} -> ok
@@ -392,14 +392,14 @@ handle_info({ Transport, Socket, BinaryMsg }, live, State = #client_state{ socke
             {next_state, live, release_stream_id(StreamID, State)};
         
         {ok, #cqerl_frame{opcode=?CQERL_OP_RESULT, stream_id=StreamID}, {schema_change, ResponseTerm}, Delayed} ->
-            case orddict:find(StreamID, State#client_state.queries) of
+            case dict:find(StreamID, State#client_state.queries) of
                 {ok, {Call, _}} -> respond_to_user(Call, ResponseTerm);
                 {ok, undefined} -> ok
             end,
             {next_state, live, release_stream_id(StreamID, State)};
         
         {ok, #cqerl_frame{opcode=?CQERL_OP_ERROR, stream_id=StreamID}, ErrorTerm, Delayed} when StreamID >= 0 ->
-            case orddict:find(StreamID, State#client_state.queries) of
+            case dict:find(StreamID, State#client_state.queries) of
                 {ok, {preparing, Query}} ->
                     cqerl_cache:query_preparation_failed({State#client_state.inet, Query}, ErrorTerm);
                 {ok, {Call, _}} -> respond_to_user(Call, {error, ErrorTerm});
@@ -433,7 +433,7 @@ handle_info({ Transport, Socket, BinaryMsg }, sleep, State = #client_state{ sock
         {ok, #cqerl_frame{stream_id=StreamID}} when StreamID < ?QUERIES_MAX, StreamID >= 0 ->
             Queries0 = State#client_state.queries,
             Slots0 = State#client_state.available_slots,
-            Queries1 = orddict:store(StreamID, undefined, Queries0),
+            Queries1 = dict:store(StreamID, undefined, Queries0),
             Slots1 = ordsets:add_element(StreamID, Slots0),
             {next_state, sleep, State#client_state{available_slots=Slots1, queries=Queries1, delayed = <<>>}, Duration};
         
@@ -473,7 +473,7 @@ terminate(Reason, live, #client_state{queries=Queries}) ->
         ({_I, {#cql_call{type=async, caller={Pid, Tag}}, _}}) -> 
             Pid ! {cql_error, Tag, Reason};
         ({_I, _}) -> ok
-    end, Queries);
+    end, dict:to_list(Queries));
 
 terminate(Reason, starting, #client_state{users=Users}) ->
     lists:foreach(fun (From) -> gen_server:reply(From, {closed, Reason}) end, Users),
@@ -535,7 +535,7 @@ append_delayed_segment({X, Y, Z, State}, Delayed) ->
 release_stream_id(StreamID, State=#client_state{available_slots=Slots, queries=Queries}) ->
     State2 = State#client_state{
         available_slots=[StreamID | Slots], 
-        queries=orddict:store(StreamID, undefined, Queries)
+        queries=dict:store(StreamID, undefined, Queries)
     },
     if  length(Slots) - 5 == ?QUERIES_MAX - ?QUERIES_HW -> signal_avail();
         true -> ok
@@ -552,7 +552,7 @@ process_outgoing_query(prepare, Query, State=#client_state{queries=Queries0}) ->
     {ok, PrepareFrame} = cqerl_protocol:prepare_frame(BaseFrame, Query),
     send_to_db(State1, PrepareFrame),
     maybe_signal_busy(State1),
-    Queries1 = orddict:store(BaseFrame#cqerl_frame.stream_id, {preparing, Query}, Queries0),
+    Queries1 = dict:store(BaseFrame#cqerl_frame.stream_id, {preparing, Query}, Queries0),
     State1#client_state{queries=Queries1};
 
 process_outgoing_query(Call=#cql_call{}, Batch=#cql_query_batch{}, State=#client_state{queries=Queries0}) ->
@@ -560,24 +560,24 @@ process_outgoing_query(Call=#cql_call{}, Batch=#cql_query_batch{}, State=#client
     {ok, BatchFrame} = cqerl_protocol:batch_frame(BaseFrame, Batch),
     send_to_db(State1, BatchFrame),
     maybe_signal_busy(State1),
-    Queries1 = orddict:store(BaseFrame#cqerl_frame.stream_id, {Call, void}, Queries0),
+    Queries1 = dict:store(BaseFrame#cqerl_frame.stream_id, {Call, void}, Queries0),
     State1#client_state{queries=Queries1};
 
 process_outgoing_query(Call,
                        {queued, Continuation=#cql_result{cql_query=#cql_query{statement=Statement}}},
                        State=#client_state{waiting_preparation=Waiting}) ->
-    Waiting2 = case orddict:find(Statement, Waiting) of
-        error -> orddict:store(Statement, [{Call, Continuation}], Waiting);
-        _     -> orddict:append(Statement, {Call, Continuation}, Waiting)
+    Waiting2 = case dict:find(Statement, Waiting) of
+        error -> dict:store(Statement, [{Call, Continuation}], Waiting);
+        _     -> dict:append(Statement, {Call, Continuation}, Waiting)
     end,
     State#client_state{waiting_preparation=Waiting2};
 
 process_outgoing_query(Call,
                        {queued, Query=#cql_query{statement=Statement}},
                        State=#client_state{waiting_preparation=Waiting}) ->
-    Waiting2 = case orddict:find(Statement, Waiting) of
-        error -> orddict:store(Statement, [{Call, Query}], Waiting);
-        _     -> orddict:append(Statement, {Call, Query}, Waiting)
+    Waiting2 = case dict:find(Statement, Waiting) of
+        error -> dict:store(Statement, [{Call, Query}], Waiting);
+        _     -> dict:append(Statement, {Call, Query}, Waiting)
     end,
     State#client_state{waiting_preparation=Waiting2};
 
@@ -597,7 +597,7 @@ process_outgoing_query(Call,
     end,
     {ok, Frame} = case CachedResult of
         uncached ->
-            Queries1 = orddict:store(I, {Call, {Query, ColumnSpecs}}, Queries0),
+            Queries1 = dict:store(I, {Call, {Query, ColumnSpecs}}, Queries0),
             cqerl_protocol:query_frame(BaseFrame,
                 #cqerl_query_parameters{
                     skip_metadata       = SkipMetadata,
@@ -614,7 +614,7 @@ process_outgoing_query(Call,
             );
         
         #cqerl_cached_query{query_ref=Ref, result_metadata=#cqerl_result_metadata{columns=CachedColumnSpecs}, params_metadata=PMetadata} ->
-            Queries1 = orddict:store(I, {Call, {Query, CachedColumnSpecs}}, Queries0),
+            Queries1 = dict:store(I, {Call, {Query, CachedColumnSpecs}}, Queries0),
             cqerl_protocol:execute_frame(BaseFrame,
                 #cqerl_query_parameters{
                     skip_metadata       = length(CachedColumnSpecs) > 0,
@@ -673,8 +673,8 @@ remove_user(Ref, State=#client_state{users=Users, queued=Queue0, queries=Queries
             Queries1 = lists:map(fun
                 ({I, {{_, _, CRef}, _, _}}) when Ref == CRef -> {I, undefined};
                 (Entry) -> Entry
-            end, Queries0),
-            State#client_state{queued=Queue0, queries=Queries1}
+            end, dict:to_list(Queries0)),
+            State#client_state{queued=Queue0, queries=dict:from_list(Queries1)}
     end.
 
 
@@ -701,7 +701,7 @@ switch_to_live_state(State=#client_state{users=Users, keyspace=Keyspace, inet=In
         authstate=undefined, authargs=undefined, delayed = <<>>,
         queued=queue:new(), 
         queries=Queries,
-        available_slots = orddict:fetch_keys(Queries),
+        available_slots = dict:fetch_keys(Queries),
         users=UsersTab 
     },
     State1.
@@ -829,7 +829,7 @@ module_exists(Module) ->
 
 
 create_queries_dict() ->
-    create_queries_dict(?QUERIES_MAX-1, []).
+    dict:from_list(create_queries_dict(?QUERIES_MAX-1, [])).
 
 create_queries_dict(0, Acc) ->
     [{0, undefined} | Acc];

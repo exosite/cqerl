@@ -242,16 +242,16 @@ init([]) ->
     process_flag(trap_exit, true),
     io:format("== Starting CQErl frontend. ==~n", []),
     {ok, #cqerl_state{clients = ets:new(clients, [set, private, {keypos, #cql_client.pid}]),
-                      client_stats=[],
+                      client_stats=dict:new(),
                       named_nodes=[]}, 0}.
 
 
 
 
-handle_call(get_any_client, _From, State=#cqerl_state{client_stats=[]}) ->
+handle_call(get_any_client, _From, State, 0) ->
     {reply, {error, no_configured_node}, State#cqerl_state{retrying=false}};
 
-handle_call(get_any_client, From, State=#cqerl_state{client_stats=Stats, clients=Clients, retrying=Retrying}) ->
+handle_call(get_any_client, From, State=#cqerl_state{client_stats=Stats, clients=Clients, retrying=Retrying}, _SizeNotNull) ->
     case select_client(Clients, #cql_client{busy=false, _='_'}, From) of
         no_available_clients when Retrying ->
             retry;
@@ -264,24 +264,27 @@ handle_call(get_any_client, From, State=#cqerl_state{client_stats=Stats, clients
             {noreply, State#cqerl_state{retrying=false}};
         
         {new, _Pid, NodeKey} ->
-            {ok, CStats=#cql_client_stats{count=Count}} = orddict:find(NodeKey, Stats),
-            {noreply, State#cqerl_state{retrying=false, client_stats = orddict:store(NodeKey, CStats#cql_client_stats{count=Count+1}, Stats)}}
-    end;
+            {ok, CStats=#cql_client_stats{count=Count}} = dict:find(NodeKey, Stats),
+            {noreply, State#cqerl_state{retrying=false, client_stats = dict:store(NodeKey, CStats#cql_client_stats{count=Count+1}, Stats)}}
+    end.
+
+handle_call(get_any_client, _From, State=#cqerl_state{client_stats=Stats}) ->
+    handle_call(get_any_client, _From, State, dict:size(Stats));
 
 handle_call(Req={get_client, Node, Opts}, From, 
             State=#cqerl_state{clients=Clients, client_stats=Stats, retrying=Retrying, globalopts=GlobalOpts, named_nodes=NamedNodes}) ->
     
     NodeKey = if 
         is_atom(Node) ->
-            {ok, Nodes} = orddict:find(Node, NamedNodes),
+            {ok, Nodes} = dict:find(Node, NamedNodes),
             lists:nth(random:uniform(length(Nodes)), Nodes);
         true ->
             node_key(Node, {Opts, GlobalOpts})
     end,
-    case orddict:find(NodeKey, Stats) of
+    case dict:find(NodeKey, Stats) of
         error ->
             State2 = new_pool(NodeKey, Opts, GlobalOpts, State),
-            case orddict:find(NodeKey, State2#cqerl_state.client_stats) of
+            case dict:find(NodeKey, State2#cqerl_state.client_stats) of
                 #cql_client_stats{count=0} -> 
                     {reply, {error, no_available_clients}, State2#cqerl_state{retrying=false}};
                 _ -> 
@@ -302,8 +305,8 @@ handle_call(Req={get_client, Node, Opts}, From,
                     {noreply, State#cqerl_state{retrying=false}};
                 
                 {new, _Pid, NodeKey} ->
-                    {ok, CStats=#cql_client_stats{count=Count}} = orddict:find(NodeKey, Stats),
-                    {noreply, State#cqerl_state{retrying=false, client_stats=orddict:store(NodeKey, CStats#cql_client_stats{count=Count+1}, Stats)}}
+                    {ok, CStats=#cql_client_stats{count=Count}} = dict:find(NodeKey, Stats),
+                    {noreply, State#cqerl_state{retrying=false, client_stats=dict:store(NodeKey, CStats#cql_client_stats{count=Count+1}, Stats)}}
             end
     end;
 
@@ -316,7 +319,7 @@ handle_call(_Msg, _From, State) ->
 
 handle_cast({prepare_client, Node, Opts}, State=#cqerl_state{client_stats=Stats, globalopts=GlobalOpts}) ->
     NodeKey = node_key(Node, {Opts, GlobalOpts}),
-    case orddict:find(NodeKey, Stats) of
+    case dict:find(NodeKey, Stats) of
         error -> 
             State2 = new_pool(NodeKey, Opts, GlobalOpts, State),
             {noreply, State2};
@@ -331,7 +334,7 @@ handle_cast({client_alive, Pid, Inet, Keyspace}, State=#cqerl_state{clients=Clie
         _ ->
             NodeKey = node_key(Inet, Keyspace),
             PoolKey = pool_from_node(NodeKey),
-            case orddict:find(NodeKey, Stats) of
+            case dict:find(NodeKey, Stats) of
                 {ok, CStats=#cql_client_stats{count=Count, min_count=Min}} when Count < Min ->
                     FindMember = fun (F, Acc) ->
                         case pooler:take_member(PoolKey) of
@@ -340,7 +343,7 @@ handle_cast({client_alive, Pid, Inet, Keyspace}, State=#cqerl_state{clients=Clie
                             Pid ->
                                 link(Pid),
                                 ets:insert(Clients, #cql_client{node=NodeKey, busy=false, pid=Pid}),
-                                Stats1 = orddict:store(NodeKey, CStats#cql_client_stats{count=Count+1}, Stats),
+                                Stats1 = dict:store(NodeKey, CStats#cql_client_stats{count=Count+1}, Stats),
                                 {State#cqerl_state{client_stats=Stats1}, Acc};
                             OtherPid ->
                                 F(F, [OtherPid | Acc])
@@ -372,7 +375,7 @@ handle_cast({client_avail, Pid}, State=#cqerl_state{clients=Clients}) ->
 handle_cast({client_asleep, Pid}, State=#cqerl_state{clients=Clients, client_stats=Stats}) ->
     case ets:lookup(Clients, Pid) of
         [#cql_client{node=NodeKey}] ->
-            case orddict:find(NodeKey, Stats) of
+            case dict:find(NodeKey, Stats) of
                 {ok, #cql_client_stats{min_count=Min, count=Count}} when Count =< Min ->
                     {noreply, State};
                 {ok, CStats=#cql_client_stats{count=Count}} ->
@@ -380,7 +383,7 @@ handle_cast({client_asleep, Pid}, State=#cqerl_state{clients=Clients, client_sta
                     pooler:return_member(Pool, Pid, ok),
                     unlink(Pid),
                     ets:delete(Clients, Pid),
-                    Stats1 = orddict:store(NodeKey, CStats#cql_client_stats{count=Count-1}, Stats),
+                    Stats1 = dict:store(NodeKey, CStats#cql_client_stats{count=Count-1}, Stats),
                     {noreply, State#cqerl_state{client_stats=Stats1}};
                 error ->
                     {noreply, State}
@@ -398,8 +401,8 @@ handle_cast(_Msg, State) ->
 handle_info({'EXIT', From, Reason}, State=#cqerl_state{clients=Clients, client_stats=Stats}) ->
     case ets:lookup(Clients, From) of
         [#cql_client{node=NodeKey}] ->
-            {ok, CStats=#cql_client_stats{count=Count}} = orddict:find(NodeKey, Stats),
-            {noreply, State#cqerl_state{client_stats = orddict:store(NodeKey, CStats#cql_client_stats{count = Count-1}, Stats)}};
+            {ok, CStats=#cql_client_stats{count=Count}} = dict:find(NodeKey, Stats),
+            {noreply, State#cqerl_state{client_stats = dict:store(NodeKey, CStats#cql_client_stats{count = Count-1}, Stats)}};
         [] ->
             {stop, Reason, State}
     end;
@@ -523,9 +526,9 @@ new_pool(NodeKey={Ip, Port, Keyspace}, LocalOpts, GlobalOpts, State=#cqerl_state
                                        
     NamedNodes = case OptGetter(name) of
         undefined -> NamedNodes0;
-        Name -> orddict:append(Name, NodeKey, NamedNodes0)
+        Name -> dict:append(Name, NodeKey, NamedNodes0)
     end,
-    State#cqerl_state{client_stats=orddict:store(NodeKey, ClientStats, ClientsStats), named_nodes=NamedNodes}.
+    State#cqerl_state{client_stats=dict:store(NodeKey, ClientStats, ClientsStats), named_nodes=NamedNodes}.
 
 
 prepare_pool_members(_NodeKey, ClientStats, _Clients, 0) -> ClientStats;
