@@ -718,7 +718,7 @@ send_to_db(#client_state{trans=ssl, socket=Socket}, Data) when is_binary(Data) -
 
 
 create_socket({Addr, Port}, Opts) ->
-    BaseOpts = [{active, false}, {mode, binary}],
+    BaseOpts = [{active, true}, {mode, binary}, {recbuf, 128*1024}, {sndbuf, 128*1024}],
     Result = case proplists:lookup(ssl, Opts) of
         {ssl, false} ->
             Transport = tcp,
@@ -744,12 +744,8 @@ close_socket(#client_state{trans=tcp, socket=Socket}) ->
 
 
 
-activate_socket(#client_state{socket=undefined}) ->
-    ok;
-activate_socket(#client_state{trans=ssl, socket=Socket}) ->
-    ssl:setopts(Socket, [{active, once}, {mode, binary}, {packet, raw}]);
-activate_socket(#client_state{trans=tcp, socket=Socket}) ->
-    inet:setopts(Socket, [{active, once}, {packet, raw}]).
+activate_socket(_State) ->
+    ok.
 
 
 
