@@ -566,19 +566,17 @@ make_option_getter(Local, Global) ->
 
 
 select_client(Clients, MatchClient = #cql_client{node=Node}, User) ->
-    case ets:match_object(Clients, MatchClient) of
-        AvailableClients when length(AvailableClients) > 0 ->
-            RandIdx = random:uniform(length(AvailableClients)),
-            #cql_client{pid=Pid, node=NodeKey} = lists:nth(RandIdx, AvailableClients),
-            case is_process_alive(Pid) of
-                true ->
-                    cqerl_client:new_user(Pid, User),
-                    {existing, Pid, NodeKey};
-                false ->
-                    no_available_clients
-            end;
+    case next(Clients, MatchClient) of
+        #cql_client{pid=Pid, node=NodeKey} ->
+          case is_process_alive(Pid) of
+              true ->
+                  cqerl_client:new_user(Pid, User),
+                  {existing, Pid, NodeKey};
+              false ->
+                  no_available_clients
+          end;
 
-        [] ->
+        undefined ->
             NewMember = case Node of
                 '_' -> pooler:take_group_member(cqerl);
                  _  -> pooler:take_member(pool_from_node(Node))
@@ -632,4 +630,27 @@ pool_from_node(Node = { Addr , Port, Keyspace }) when is_tuple(Addr), is_integer
 node_from_pool(PoolName) when is_atom(PoolName) ->
     binary_to_term(base64:decode(atom_to_binary(PoolName, latin1))).
 
+next(Clients, MatchClient) ->
+    Key = {Clients, MatchClient},
+    Result = case get(Key) of
+        undefined ->
+            ets:match_object(Clients, MatchClient, 1);
+        Continuation ->
+            ContResult = ets:match_object(Continuation),
+            case ContResult of
+                '$end_of_table' ->
+                    ets:match_object(Clients, MatchClient, 1);
+                _ ->
+                    ContResult
+            end
+
+    end,
+    case Result of
+        {[Match], Continuation2} ->
+            put(Key, Continuation2),
+            Match;
+        '$end_of_table' ->
+            put(Key, undefined),
+            undefined
+    end.
 
